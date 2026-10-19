@@ -8,10 +8,12 @@
   <style>
     * { box-sizing: border-box; }
     html, body { margin: 0; min-height: 100%; }
-    body { background: #a9dfff; }
+    body { background: #a9dfff; overflow: hidden; }
     .camera {
       position: fixed;
       inset: 0;
+      top: 0;
+      left: 0;
       width: 100%;
       height: 100%;
       object-fit: cover;
@@ -34,7 +36,7 @@
       text-align: center;
     }
     .camera-controls p { margin: 0 0 8px; }
-    .camera-controls button {
+    .camera-controls button, #fly-again {
       min-height: 44px;
       padding: 8px 20px;
       border: 0;
@@ -44,8 +46,19 @@
       font: inherit;
       cursor: pointer;
     }
+    #fly-again {
+      position: fixed;
+      top: max(16px, env(safe-area-inset-top));
+      right: 16px;
+      z-index: 2;
+    }
+    #fly-again:disabled { opacity: .65; cursor: default; }
     main {
-      position: relative;
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
       z-index: 1;
       min-height: 100vh;
       min-height: 100svh;
@@ -55,6 +68,8 @@
     }
     .bird {
       display: block;
+      width: 70vw;
+      max-width: 300px;
       width: min(70vw, 300px);
       height: auto;
       touch-action: none;
@@ -67,6 +82,7 @@
 </head>
 <body>
   <video class="camera" autoplay muted playsinline hidden aria-hidden="true"></video>
+  <button id="fly-again" type="button">もう一度飛ばす</button>
   <div class="camera-controls">
     <p id="camera-status" role="status" aria-live="polite">カメラを開始すると、使用許可を求めます。</p>
     <button id="camera-start" type="button">カメラを開始</button>
@@ -113,7 +129,7 @@
 
     async function startCamera() {
       if (cameraStarting || cameraStream) return;
-      if (!navigator.mediaDevices?.getUserMedia) {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         cameraFailed('この環境ではカメラを利用できません。対応ブラウザーのHTTPSまたはlocalhostで開いてください。');
         return;
       }
@@ -136,6 +152,7 @@
         if (cameraStream !== stream) return;
         camera.hidden = false;
         cameraControls.hidden = true;
+        flyBird();
       } catch (error) {
         const messages = {
           NotAllowedError: 'カメラの使用が許可されませんでした。ブラウザーや端末の設定でカメラを許可してから再試行してください。',
@@ -154,6 +171,7 @@
     cameraStart.addEventListener('click', startCamera);
     camera.addEventListener('error', () => cameraFailed('カメラ映像を表示できませんでした。'));
     window.addEventListener('pagehide', () => {
+      finishFlight();
       stopCamera();
       cameraControls.hidden = false;
       cameraStatus.textContent = 'カメラを開始すると、使用許可を求めます。';
@@ -163,9 +181,68 @@
     let positionX = 0;
     let positionY = 0;
     let drag = null;
+    const flyAgain = document.querySelector('#fly-again');
+    let flightFrame = null;
+    let flying = false;
+
+    function renderBird() {
+      bird.style.transform = `translate(${positionX}px, ${positionY}px)`;
+    }
+
+    function finishFlight() {
+      if (flightFrame !== null) cancelAnimationFrame(flightFrame);
+      flightFrame = null;
+      flying = false;
+      flyAgain.disabled = false;
+    }
+
+    function flyBird() {
+      if (drag !== null) stopDragging({ pointerId: drag.pointerId });
+      finishFlight();
+      // transform前の配置を基準にし、ドラッグ後でも同じ着地点へ戻る。
+      const bounds = bird.getBoundingClientRect();
+      const baseLeft = bounds.left - positionX;
+      const baseTop = bounds.top - positionY;
+      const endX = window.innerWidth / 2 - baseLeft - bounds.width / 2;
+      const endY = window.innerHeight / 2 - baseTop - bounds.height / 2;
+      const startX = window.innerWidth + 24 - baseLeft;
+      const lift = Math.min(100, window.innerHeight * .15);
+      const startY = endY - lift * .45;
+      let startedAt = null;
+      flying = true;
+      flyAgain.disabled = true;
+      positionX = startX;
+      positionY = startY;
+      renderBird();
+
+      function frame(now) {
+        if (startedAt === null) startedAt = now;
+        const progress = Math.min(1, (now - startedAt) / 2400);
+        // ease-outで減速しながら、二次ベジェ曲線をたどる。
+        const t = 1 - Math.pow(1 - progress, 3);
+        const remaining = 1 - t;
+        positionX = remaining * remaining * startX
+          + 2 * remaining * t * (endX + (startX - endX) * .45) + t * t * endX;
+        positionY = remaining * remaining * startY
+          + 2 * remaining * t * (endY - lift) + t * t * endY;
+        renderBird();
+        if (progress < 1) flightFrame = requestAnimationFrame(frame);
+        else finishFlight();
+      }
+      flightFrame = requestAnimationFrame(frame);
+    }
+
+    flyAgain.addEventListener('click', flyBird);
+    window.addEventListener('resize', () => {
+      if (!flying) return;
+      finishFlight();
+      positionX = 0;
+      positionY = 0;
+      renderBird();
+    });
 
     bird.addEventListener('pointerdown', (event) => {
-      if (drag !== null || !event.isPrimary || event.button !== 0) return;
+      if (flying || drag !== null || !event.isPrimary || event.button !== 0) return;
 
       // 押した位置と現在の移動量を保存し、つかんだ瞬間の位置ずれを防ぐ。
       drag = {
