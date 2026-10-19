@@ -67,6 +67,10 @@
       padding: 24px;
     }
     .bird {
+      position: fixed;
+      top: 0;
+      left: 0;
+      transform: translateX(110vw);
       display: block;
       width: 70vw;
       max-width: 300px;
@@ -122,6 +126,13 @@
 
     function cameraFailed(message) {
       stopCamera();
+      if (birdWaiting) {
+        birdWaiting = false;
+        const bounds = bird.getBoundingClientRect();
+        positionX = (window.innerWidth - bounds.width) / 2;
+        positionY = (window.innerHeight - bounds.height) / 2;
+        renderBird();
+      }
       cameraControls.hidden = false;
       cameraStatus.textContent = message + ' 青空の背景で引き続き鳥を動かせます。';
       cameraStart.textContent = 'カメラを再試行';
@@ -148,9 +159,13 @@
           });
         });
         camera.srcObject = stream;
+        // Safariで非表示のvideoの再生待ちにしない。
+        camera.hidden = false;
         await camera.play();
         if (cameraStream !== stream) return;
-        camera.hidden = false;
+        // 映像を描画する機会を作ってから鳥を飛ばす。
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+        if (cameraStream !== stream) return;
         cameraControls.hidden = true;
         flyBird();
       } catch (error) {
@@ -178,12 +193,13 @@
     });
 
     const bird = document.querySelector('.bird');
-    let positionX = 0;
+    let positionX = window.innerWidth + 24;
     let positionY = 0;
     let drag = null;
     const flyAgain = document.querySelector('#fly-again');
     let flightFrame = null;
     let flying = false;
+    let birdWaiting = true;
 
     function renderBird() {
       bird.style.transform = `translate(${positionX}px, ${positionY}px)`;
@@ -199,16 +215,17 @@
     function flyBird() {
       if (drag !== null) stopDragging({ pointerId: drag.pointerId });
       finishFlight();
-      // transform前の配置を基準にし、ドラッグ後でも同じ着地点へ戻る。
+      // 画面左上を固定の原点にし、Safariの表示領域変更で位置が跳ばないようにする。
       const bounds = bird.getBoundingClientRect();
-      const baseLeft = bounds.left - positionX;
-      const baseTop = bounds.top - positionY;
-      const endX = window.innerWidth / 2 - baseLeft - bounds.width / 2;
-      const endY = window.innerHeight / 2 - baseTop - bounds.height / 2;
-      const startX = window.innerWidth + 24 - baseLeft;
+      const endX = (window.innerWidth - bounds.width) / 2;
+      const endY = (window.innerHeight - bounds.height) / 2;
+      const startX = window.innerWidth + 24;
       const lift = Math.min(100, window.innerHeight * .15);
       const startY = endY - lift * .45;
       let startedAt = null;
+      birdWaiting = false;
+      // 飛行中は鳥の寸法も固定し、viewport変更による拡縮を防ぐ。
+      bird.style.width = bounds.width + 'px';
       flying = true;
       flyAgain.disabled = true;
       positionX = startX;
@@ -234,12 +251,13 @@
 
     flyAgain.addEventListener('click', flyBird);
     window.addEventListener('resize', () => {
-      if (!flying) return;
-      finishFlight();
-      positionX = 0;
-      positionY = 0;
-      renderBird();
+      // 待機中だけ画面外の位置を更新。飛行・ドラッグ中の座標には触れない。
+      if (birdWaiting) {
+        positionX = window.innerWidth + 24;
+        renderBird();
+      }
     });
+    renderBird();
 
     bird.addEventListener('pointerdown', (event) => {
       if (flying || drag !== null || !event.isPrimary || event.button !== 0) return;
