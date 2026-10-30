@@ -82,11 +82,40 @@
       cursor: grab;
     }
     .bird.is-dragging { cursor: grabbing; }
+    .camera-diagnostics {
+      visibility: hidden;
+      pointer-events: none;
+      position: fixed;
+      z-index: 3;
+      top: 72px;
+      left: 12px;
+      right: 12px;
+      max-width: 520px;
+      padding: 8px 12px;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, .94);
+      color: #304d60;
+      font: 12px/1.5 system-ui, sans-serif;
+    }
+    .camera-diagnostics summary { cursor: pointer; min-height: 28px; }
+    #camera-log {
+      max-height: 25vh;
+      overflow: auto;
+      -webkit-overflow-scrolling: touch;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      user-select: text;
+      margin: 4px 0 0;
+    }
   </style>
 </head>
 <body>
   <video class="camera" autoplay muted playsinline hidden aria-hidden="true"></video>
   <button id="fly-again" type="button">もう一度飛ばす</button>
+  <details class="camera-diagnostics" open>
+    <summary>カメラ診断（タップで開閉）</summary>
+    <pre id="camera-log" aria-label="カメラ診断ログ"></pre>
+  </details>
   <div class="camera-controls">
     <p id="camera-status" role="status" aria-live="polite">カメラを開始すると、使用許可を求めます。</p>
     <button id="camera-start" type="button">カメラを開始</button>
@@ -115,6 +144,35 @@
     const cameraStart = document.querySelector('#camera-start');
     let cameraStream = null;
     let cameraStarting = false;
+    const cameraLog = document.querySelector('#camera-log');
+    const diagnosticLines = [];
+    let cameraAttempt = 0;
+
+    function logCamera(message) {
+      diagnosticLines.push(`[${new Date().toLocaleTimeString()} / 試行${cameraAttempt}] ${message}`);
+      if (diagnosticLines.length > 80) diagnosticLines.shift();
+      cameraLog.textContent = diagnosticLines.join('\n');
+      cameraLog.scrollTop = cameraLog.scrollHeight;
+    }
+
+    function logVideoState(label) {
+      logCamera(`${label}: videoWidth=${camera.videoWidth}, videoHeight=${camera.videoHeight}, readyState=${camera.readyState}, paused=${camera.paused}, hidden=${camera.hidden}`);
+    }
+
+    function logCameraError(stage, error) {
+      const name = error && error.name ? error.name : '名前なし';
+      const message = error && error.message ? error.message : String(error);
+      const code = error && error.code !== undefined ? ` / code=${error.code}` : '';
+      const constraint = error && error.constraint ? ` / constraint=${error.constraint}` : '';
+      logCamera(`${stage}: エラー名=${name} / 詳細=${message}${code}${constraint}`);
+      logVideoState('エラー発生時');
+      document.querySelector('.camera-diagnostics').open = true;
+    }
+
+    logCamera(`診断開始: secureContext=${window.isSecureContext}, getUserMedia=${!!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)}`);
+    ['loadedmetadata', 'loadeddata', 'playing', 'waiting', 'stalled', 'resize'].forEach((type) => {
+      camera.addEventListener(type, () => logVideoState(`videoイベント ${type}`));
+    });
 
     function stopCamera() {
       const stream = cameraStream;
@@ -125,6 +183,7 @@
     }
 
     function cameraFailed(message) {
+      logCamera(`フォールバック: ${message}`);
       stopCamera();
       if (birdWaiting) {
         birdWaiting = false;
@@ -140,35 +199,50 @@
 
     async function startCamera() {
       if (cameraStarting || cameraStream) return;
+      cameraAttempt += 1;
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        logCameraError('getUserMedia 利用不可', { name: 'NotSupportedError', message: 'navigator.mediaDevices.getUserMedia がありません。' });
         cameraFailed('この環境ではカメラを利用できません。対応ブラウザーのHTTPSまたはlocalhostで開いてください。');
         return;
       }
       cameraStarting = true;
       cameraStart.disabled = true;
       cameraStatus.textContent = 'カメラの使用を許可してください。';
+      let cameraStage = 'getUserMedia';
       try {
+        logCamera('getUserMedia: 開始（背面カメラ優先・音声なし）');
         const stream = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: { ideal: 'environment' } },
           audio: false
         });
+        logCamera(`getUserMedia: 成功 / videoTracks=${stream.getVideoTracks().length}, active=${stream.active}`);
+        cameraStage = '映像の接続';
         cameraStream = stream;
         stream.getVideoTracks().forEach((track) => {
           track.addEventListener('ended', () => {
+            logCamera('映像トラック: ended');
             if (cameraStream === stream) cameraFailed('カメラ映像が停止しました。');
           });
         });
         camera.srcObject = stream;
         // Safariで非表示のvideoの再生待ちにしない。
         camera.hidden = false;
+        cameraStage = 'video.play()';
+        logCamera('video.play(): 開始');
         await camera.play();
+        logCamera('video.play(): 成功');
+        logVideoState('再生成功直後');
         if (cameraStream !== stream) return;
         // 映像を描画する機会を作ってから鳥を飛ばす。
+        cameraStage = '再生後の処理';
         await new Promise((resolve) => requestAnimationFrame(resolve));
         if (cameraStream !== stream) return;
+        logVideoState('描画フレーム後');
         cameraControls.hidden = true;
+        cameraStage = '鳥の飛行開始';
         flyBird();
       } catch (error) {
+        logCameraError(`${cameraStage}: 失敗`, error);
         const messages = {
           NotAllowedError: 'カメラの使用が許可されませんでした。ブラウザーや端末の設定でカメラを許可してから再試行してください。',
           NotFoundError: '利用できるカメラが見つかりません。',
@@ -184,7 +258,10 @@
     }
 
     cameraStart.addEventListener('click', startCamera);
-    camera.addEventListener('error', () => cameraFailed('カメラ映像を表示できませんでした。'));
+    camera.addEventListener('error', () => {
+      logCameraError('video errorイベント', camera.error || { name: 'MediaError', message: '詳細情報なし' });
+      cameraFailed('カメラ映像を表示できませんでした。');
+    });
     window.addEventListener('pagehide', () => {
       finishFlight();
       stopCamera();
