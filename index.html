@@ -70,18 +70,15 @@
       position: fixed;
       top: 0;
       left: 0;
-      transform: translateX(110vw);
-      display: block;
       width: 70vw;
-      max-width: 300px;
-      width: min(70vw, 300px);
+      max-width: none;
       height: auto;
-      touch-action: none;
+      visibility: hidden;
+      pointer-events: none;
       user-select: none;
       -webkit-user-select: none;
-      cursor: grab;
+      will-change: transform;
     }
-    .bird.is-dragging { cursor: grabbing; }
     .camera-diagnostics {
       visibility: hidden;
       pointer-events: none;
@@ -121,21 +118,9 @@
     <button id="camera-start" type="button">カメラを開始</button>
   </div>
   <main>
-    <svg class="bird" viewBox="0 0 320 320" role="img" aria-labelledby="bird-title bird-description" xmlns="http://www.w3.org/2000/svg">
-      <title id="bird-title">小さな鳥</title>
-      <desc id="bird-description">明るい空色の背景に、黄色いくちばしと青い羽を持つ、丸い白い鳥が座っています。</desc>
-      <ellipse cx="160" cy="278" rx="76" ry="9" fill="#6db9e5" opacity=".25"/>
-      <path d="M132 253v20m0-2-12 5m12-5 10 5M184 253v20m0-2-10 5m10-5 12 5" fill="none" stroke="#d89a46" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
-      <path d="m224 205 48-24-9 43-44 12" fill="#4b93c4"/>
-      <path d="M80 176c0-57 30-99 78-99 54 0 86 46 86 102 0 53-30 83-82 83-51 0-82-30-82-86Z" fill="#fffdf4"/>
-      <path d="M139 83c-9-13-5-24 1-30 3 13 11 16 17 23 2-14 11-21 20-22-5 11-5 19-4 25" fill="#fffdf4"/>
-      <path d="M94 169c-23 7-32 31-23 51 8 18 28 24 47 13 19-12 28-36 24-47-4-12-25-24-48-17Z" fill="#71b4df"/>
-      <path d="M91 197c7 11 17 15 27 12" fill="none" stroke="#559dce" stroke-width="5" stroke-linecap="round"/>
-      <circle cx="185" cy="139" r="7" fill="#304d60"/>
-      <circle cx="187" cy="137" r="2" fill="white"/>
-      <path d="m211 150 28 11-28 12Z" fill="#f2b84f" stroke-linejoin="round"/>
-      <ellipse cx="187" cy="164" rx="12" ry="7" fill="#f7b8a7" opacity=".7"/>
-    </svg>
+    <img class="bird" id="glide-back" src="zenjiro/glide-back.png" width="1536" height="1024" alt="背中を見せて滑空する膳二郎" draggable="false">
+    <img class="bird" id="glide-belly" src="zenjiro/glide-belly.png" width="1536" height="1024" alt="お腹を見せて上昇する膳二郎" draggable="false">
+    <img class="bird" id="flyby-front" src="zenjiro/flyby-front.png" width="1536" height="1024" alt="正面から近づく膳二郎" draggable="false">
   </main>
   <script>
     const camera = document.querySelector('.camera');
@@ -185,15 +170,8 @@
     function cameraFailed(message) {
       logCamera(`フォールバック: ${message}`);
       stopCamera();
-      if (birdWaiting) {
-        birdWaiting = false;
-        const bounds = bird.getBoundingClientRect();
-        positionX = (window.innerWidth - bounds.width) / 2;
-        positionY = (window.innerHeight - bounds.height) / 2;
-        renderBird();
-      }
       cameraControls.hidden = false;
-      cameraStatus.textContent = message + ' 青空の背景で引き続き鳥を動かせます。';
+      cameraStatus.textContent = message + ' 青空の背景で「もう一度飛ばす」から滑空を確認できます。';
       cameraStart.textContent = 'カメラを再試行';
     }
 
@@ -269,113 +247,116 @@
       cameraStatus.textContent = 'カメラを開始すると、使用許可を求めます。';
     });
 
-    const bird = document.querySelector('.bird');
-    let positionX = window.innerWidth + 24;
-    let positionY = 0;
-    let drag = null;
+    const birds = [document.querySelector('#glide-back'), document.querySelector('#glide-belly'), document.querySelector('#flyby-front')];
     const flyAgain = document.querySelector('#fly-again');
     let flightFrame = null;
-    let flying = false;
-    let birdWaiting = true;
+    let flightRun = 0;
 
-    function renderBird() {
-      bird.style.transform = `translate(${positionX}px, ${positionY}px)`;
-    }
-
-    function finishFlight() {
+    function finishFlight(keepCloseup = false) {
+      flightRun += 1;
       if (flightFrame !== null) cancelAnimationFrame(flightFrame);
       flightFrame = null;
-      flying = false;
+      if (!keepCloseup) birds.forEach((bird) => { bird.style.visibility = 'hidden'; bird.style.filter = ''; });
       flyAgain.disabled = false;
     }
 
-    function flyBird() {
-      if (drag !== null) stopDragging({ pointerId: drag.pointerId });
-      finishFlight();
-      // 画面左上を固定の原点にし、Safariの表示領域変更で位置が跳ばないようにする。
-      const bounds = bird.getBoundingClientRect();
-      const endX = (window.innerWidth - bounds.width) / 2;
-      const endY = (window.innerHeight - bounds.height) / 2;
-      const startX = window.innerWidth + 24;
-      const lift = Math.min(100, window.innerHeight * .15);
-      const startY = endY - lift * .45;
-      let startedAt = null;
-      birdWaiting = false;
-      // 飛行中は鳥の寸法も固定し、viewport変更による拡縮を防ぐ。
-      bird.style.width = bounds.width + 'px';
-      flying = true;
-      flyAgain.disabled = true;
-      positionX = startX;
-      positionY = startY;
-      renderBird();
+    function imageReady(image) {
+      if (image.complete) return image.naturalWidth > 0
+        ? Promise.resolve() : Promise.reject(new Error('画像を読み込めません: ' + image.getAttribute('src')));
+      return new Promise((resolve, reject) => {
+        image.addEventListener('load', resolve, { once: true });
+        image.addEventListener('error', () => reject(new Error('画像を読み込めません: ' + image.getAttribute('src'))), { once: true });
+      });
+    }
 
-      function frame(now) {
-        if (startedAt === null) startedAt = now;
-        const progress = Math.min(1, (now - startedAt) / 2400);
-        // ease-outで減速しながら、二次ベジェ曲線をたどる。
-        const t = 1 - Math.pow(1 - progress, 3);
-        const remaining = 1 - t;
-        positionX = remaining * remaining * startX
-          + 2 * remaining * t * (endX + (startX - endX) * .45) + t * t * endX;
-        positionY = remaining * remaining * startY
-          + 2 * remaining * t * (endY - lift) + t * t * endY;
-        renderBird();
-        if (progress < 1) flightFrame = requestAnimationFrame(frame);
-        else finishFlight();
+    function bezier(points, t) {
+      const u = 1 - t;
+      return {
+        x: u*u*u*points[0][0] + 3*u*u*t*points[1][0] + 3*u*t*t*points[2][0] + t*t*t*points[3][0],
+        y: u*u*u*points[0][1] + 3*u*u*t*points[1][1] + 3*u*t*t*points[2][1] + t*t*t*points[3][1]
+      };
+    }
+
+    async function flyBird() {
+      finishFlight();
+      const run = flightRun;
+      flyAgain.disabled = true;
+      try {
+        document.body.dataset.scene = 'flight';
+        await Promise.all(birds.map(imageReady));
+        if (run !== flightRun) return;
+        // 開始時の画面寸法を固定。Safariのツールバーによるresizeで飛行を中断しない。
+        const w = window.innerWidth;
+        const h = window.innerHeight;
+        const size = Math.min(w * .72, 340);
+        const margin = size * .85;
+        birds.forEach((bird) => { bird.style.width = size + 'px'; });
+        const paths = [
+          [[w + margin, h*.06], [w*.65, h*.14], [w*.12, h*.57], [-margin, h*.78]],
+          [[-margin, h*.63], [w*.30, h*.40], [w*.66, h*.20], [w + margin, -size*.65]]
+        ];
+        const durations = [1400, 1550];
+        const gap = 250;
+        const secondStart = durations[0] + gap;
+        const thirdStart = secondStart + durations[1] + 160;
+        const thirdDuration = 1350;
+        const totalDuration = thirdStart + thirdDuration;
+        let startedAt = null;
+        const front = birds[2];
+        const frontRatio = front.naturalHeight / front.naturalWidth;
+        function frontAt(x, y, width, angle, blur) {
+          front.style.width = width + 'px';
+          front.style.transform = 'translate(' + (x-width/2) + 'px, ' + (y-width*frontRatio/2) + 'px) rotate(' + angle + 'deg)';
+          front.style.filter = blur > 0 ? 'blur(' + blur + 'px)' : '';
+          front.style.visibility = 'visible';
+        }
+        const smooth = (p) => p*p*(3-2*p);
+        function frame(now) {
+          if (run !== flightRun) return;
+          if (startedAt === null) startedAt = now;
+          const elapsed = now - startedAt;
+          birds.forEach((bird) => { bird.style.visibility = 'hidden'; });
+          if (elapsed < thirdStart) {
+            const index = elapsed < durations[0] ? 0 : 1;
+            const local = index === 0 ? elapsed : elapsed - secondStart;
+            if (local >= 0 && local < durations[index]) {
+              const p = local / durations[index];
+              const t = index === 0 ? p - .025*Math.sin(Math.PI*p) : .85*p + .15*p*p;
+              const point = bezier(paths[index], t);
+              const bank = index === 0 ? 5*Math.sin(Math.PI*t)-4*t : -7*Math.sin(Math.PI*t);
+              birds[index].style.transform = 'translate(' + (point.x-size/2) + 'px, ' + (point.y-size/3) + 'px) rotate(' + bank + 'deg)';
+              birds[index].style.visibility = 'visible';
+            }
+          } else if (elapsed < thirdStart + thirdDuration) {
+            const p = (elapsed-thirdStart)/thirdDuration;
+            // 遠景で少し沈み、後半の急拡大と上への抜けで奥→手前を表現。
+            const rush = Math.pow(Math.max(0, (p-.3)/.7), 3);
+            const width = w*(.075 + .16*p + 4.8*rush);
+            const x = w*(.49 + .055*Math.sin(Math.PI*p) - .02*rush);
+            const y = h*(.32 + .17*Math.sin(Math.PI*p) - 2.8*Math.pow(p, 7));
+            frontAt(x,y,width,-5*Math.sin(Math.PI*p),0);
+          }
+          if (elapsed < totalDuration) flightFrame = requestAnimationFrame(frame);
+          else {
+            finishFlight();
+            // 3羽目終了後の撮影画面接続位置。カメラは停止せず、映像を背景に残す。
+            document.body.dataset.scene = 'capture-ready';
+            window.dispatchEvent(new CustomEvent('zenjiro:scene-transition', {
+              detail: { next: 'capture', cameraReady: !!cameraStream, poseImage: null }
+            }));
+          }
+        }
+        flightFrame = requestAnimationFrame(frame);
+      } catch (error) {
+        if (run !== flightRun) return;
+        finishFlight();
+        logCameraError('滑空画像の準備', error);
+        cameraControls.hidden = false;
+        cameraStatus.textContent = '滑空画像を読み込めません。zenjiroフォルダーのPNGを確認してください。';
       }
-      flightFrame = requestAnimationFrame(frame);
     }
 
     flyAgain.addEventListener('click', flyBird);
-    window.addEventListener('resize', () => {
-      // 待機中だけ画面外の位置を更新。飛行・ドラッグ中の座標には触れない。
-      if (birdWaiting) {
-        positionX = window.innerWidth + 24;
-        renderBird();
-      }
-    });
-    renderBird();
-
-    bird.addEventListener('pointerdown', (event) => {
-      if (flying || drag !== null || !event.isPrimary || event.button !== 0) return;
-
-      // 押した位置と現在の移動量を保存し、つかんだ瞬間の位置ずれを防ぐ。
-      drag = {
-        pointerId: event.pointerId,
-        startX: event.clientX,
-        startY: event.clientY,
-        originX: positionX,
-        originY: positionY
-      };
-      bird.setPointerCapture(event.pointerId);
-      bird.classList.add('is-dragging');
-      event.preventDefault();
-    });
-
-    function moveBird(event) {
-      if (drag === null || event.pointerId !== drag.pointerId) return;
-      positionX = drag.originX + event.clientX - drag.startX;
-      positionY = drag.originY + event.clientY - drag.startY;
-      bird.style.transform = `translate(${positionX}px, ${positionY}px)`;
-    }
-
-    function stopDragging(event) {
-      if (drag === null || event.pointerId !== drag.pointerId) return;
-      drag = null;
-      bird.classList.remove('is-dragging');
-      if (bird.hasPointerCapture(event.pointerId)) {
-        bird.releasePointerCapture(event.pointerId);
-      }
-    }
-
-    bird.addEventListener('pointermove', moveBird);
-    bird.addEventListener('pointerup', (event) => {
-      moveBird(event);
-      stopDragging(event);
-    });
-    bird.addEventListener('pointercancel', stopDragging);
-    bird.addEventListener('lostpointercapture', stopDragging);
-    bird.addEventListener('dragstart', (event) => event.preventDefault());
   </script>
 </body>
 </html>
