@@ -104,6 +104,20 @@
       user-select: text;
       margin: 4px 0 0;
     }
+    #pose-layer { position: fixed; inset: 0; z-index: 1; overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; }
+    #pose-image { position: absolute; left: 0; top: 0; max-width: none; height: auto; pointer-events: none; -webkit-user-drag: none; }
+    #photo-controls { position: fixed; z-index: 4; bottom: max(18px, env(safe-area-inset-bottom)); left: 12px; right: 12px; text-align: center; pointer-events: none; font: 14px/1.5 system-ui, sans-serif; }
+    #photo-hint { display: table; margin: 0 auto 10px; padding: 5px 12px; border-radius: 20px; background: rgba(255,255,255,.92); color: #304d60; }
+    #shutter { pointer-events: auto; width: 72px; height: 72px; border: 5px solid white; border-radius: 50%; background: #fff; box-shadow: inset 0 0 0 3px #304d60, 0 2px 12px #0005; color: #304d60; font: bold 13px system-ui,sans-serif; }
+    #shutter:disabled { opacity: .55; }
+    #photo-result { position: fixed; inset: 0; z-index: 10; background: #152735; color: white; overflow: auto; padding: max(18px, env(safe-area-inset-top)) 18px max(22px, env(safe-area-inset-bottom)); font: 15px/1.6 system-ui,sans-serif; text-align: center; }
+    #photo-result h1 { margin: 4px 0 12px; font-size: 20px; }
+    #photo-preview { display: block; max-width: 100%; max-height: 60vh; width: auto; height: auto; margin: 0 auto 12px; object-fit: contain; -webkit-touch-callout: default; }
+    .photo-actions { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+    .photo-actions button, .photo-actions a { min-height: 44px; padding: 10px 16px; border: 0; border-radius: 10px; font: inherit; text-decoration: none; background: white; color: #304d60; cursor: pointer; }
+    #photo-back { background: #344c5d; color: white; }
+    #photo-result p { margin: 10px auto; max-width: 36em; }
+    #pose-layer[hidden], #photo-controls[hidden], #photo-result[hidden], #photo-preview[hidden], #photo-share[hidden], #photo-download[hidden] { display: none; }
   </style>
 </head>
 <body>
@@ -122,6 +136,23 @@
     <img class="bird" id="glide-belly" src="zenjiro/glide-belly.png" width="1536" height="1024" alt="お腹を見せて上昇する膳二郎" draggable="false">
     <img class="bird" id="flyby-front" src="zenjiro/flyby-front.png" width="1536" height="1024" alt="正面から近づく膳二郎" draggable="false">
   </main>
+  <div id="pose-layer" hidden aria-label="膳二郎の配置エリア。1本指で移動、2本指で拡大縮小">
+    <img id="pose-image" alt="記念写真の膳二郎" draggable="false">
+  </div>
+  <div id="photo-controls" hidden>
+    <p id="photo-hint" role="status">1本指で移動・2本指で大きさ調整</p>
+    <button id="shutter" type="button" aria-label="記念写真を撮影" disabled>撮影</button>
+  </div>
+  <section id="photo-result" role="dialog" aria-modal="true" aria-labelledby="photo-title" hidden>
+    <h1 id="photo-title">撮影した写真</h1>
+    <img id="photo-preview" alt="カメラ映像と膳二郎を合成した記念写真" hidden>
+    <p id="photo-save-hint" role="status">写真を作成しています…</p>
+    <div class="photo-actions">
+      <button id="photo-share" type="button" hidden>共有して保存</button>
+      <a id="photo-download" hidden>画像を保存</a>
+      <button id="photo-back" type="button">撮影画面に戻る</button>
+    </div>
+  </section>
   <script>
     const camera = document.querySelector('.camera');
     const cameraControls = document.querySelector('.camera-controls');
@@ -357,6 +388,270 @@
     }
 
     flyAgain.addEventListener('click', flyBird);
+  </script>
+  <script>
+    // 飛行・カメラの既存コードから独立した、記念写真用レイヤー。
+    const normalPoses = [
+      'stand-right.png', 'stand-left.png', 'stand-front.png',
+      'hover-right.png', 'hover-left.png', 'cozy-front-right.png',
+      'cozy-front-left.png', 'tilt-right.png', 'tilt-left.png',
+      'wave-right.png', 'wave-left.png'
+    ];
+    const poseLayer = document.querySelector('#pose-layer');
+    const poseImage = document.querySelector('#pose-image');
+    const photoControls = document.querySelector('#photo-controls');
+    const photoHint = document.querySelector('#photo-hint');
+    const shutter = document.querySelector('#shutter');
+    const photoResult = document.querySelector('#photo-result');
+    const photoPreview = document.querySelector('#photo-preview');
+    const saveHint = document.querySelector('#photo-save-hint');
+    const shareButton = document.querySelector('#photo-share');
+    const downloadPhoto = document.querySelector('#photo-download');
+    const backToCamera = document.querySelector('#photo-back');
+    const photoPointers = new Map();
+    let posePlacement = { x: 0, y: 0, width: 160 };
+    let poseGesture = null;
+    let poseReady = false;
+    let poseRequest = 0;
+    let photoBusy = false;
+    let photoFile = null;
+    let photoURL = null;
+
+    function renderPose() {
+      poseImage.style.width = posePlacement.width + 'px';
+      poseImage.style.transform = `translate(${posePlacement.x}px, ${posePlacement.y}px)`;
+    }
+
+    function cameraCanCapture() {
+      return !!cameraStream && cameraStream.active !== false && !camera.hidden
+        && camera.readyState >= 2 && camera.videoWidth > 0 && camera.videoHeight > 0;
+    }
+
+    function updateShutter() {
+      shutter.disabled = !poseReady || photoBusy || !cameraCanCapture();
+      shutter.hidden = !cameraCanCapture();
+      photoControls.style.bottom = cameraCanCapture() ? '' : '145px';
+      if (!poseReady || photoBusy) return;
+      photoHint.textContent = cameraCanCapture()
+        ? '1本指で移動・2本指で大きさ調整'
+        : '配置は確認できます。撮影にはカメラの開始が必要です。';
+    }
+
+    function clearPhotoGesture() {
+      photoPointers.forEach((point, id) => {
+        if (poseLayer.hasPointerCapture(id)) poseLayer.releasePointerCapture(id);
+      });
+      photoPointers.clear();
+      poseGesture = null;
+    }
+
+    function hidePose() {
+      poseRequest += 1;
+      poseReady = false;
+      poseLayer.hidden = true;
+      photoControls.hidden = true;
+      clearPhotoGesture();
+      updateShutter();
+    }
+
+    async function showRandomPose() {
+      hidePose();
+      const request = poseRequest;
+      photoControls.hidden = false;
+      photoHint.textContent = '膳二郎がポーズを決めています…';
+      // この飛行1回につき1度だけ抽選。移動・ピンチ・撮り直しでは再抽選しない。
+      const file = normalPoses[Math.floor(Math.random() * normalPoses.length)];
+      poseImage.src = 'zenjiro/' + file;
+      try {
+        await imageReady(poseImage);
+        if (request !== poseRequest) return;
+        const width = Math.min(window.innerWidth * .42, 240);
+        const height = width * poseImage.naturalHeight / poseImage.naturalWidth;
+        posePlacement = {
+          x: window.innerWidth * .70 - width / 2,
+          y: window.innerHeight * .65 - height / 2,
+          width
+        };
+        renderPose();
+        poseReady = true;
+        poseLayer.hidden = false;
+        updateShutter();
+      } catch (error) {
+        if (request !== poseRequest) return;
+        photoHint.textContent = 'ポーズ画像を読み込めません。「もう一度飛ばす」で再試行してください。';
+        logCameraError('決めポーズ画像', error);
+      }
+    }
+
+    window.addEventListener('zenjiro:scene-transition', (event) => {
+      if (event.detail.next === 'capture') showRandomPose();
+    });
+    // 再飛行やカメラの再起動で元の撮影レイヤーを残さない。
+    new MutationObserver(() => {
+      if (document.body.dataset.scene === 'flight') hidePose();
+    }).observe(document.body, { attributes: true, attributeFilter: ['data-scene'] });
+    ['playing', 'loadeddata', 'resize', 'emptied', 'error'].forEach((type) => {
+      camera.addEventListener(type, updateShutter);
+    });
+
+    function beginPhotoGesture() {
+      const points = Array.from(photoPointers.values());
+      if (!points.length) { poseGesture = null; return; }
+      const center = points.length === 1 ? points[0] : {
+        x: (points[0].x + points[1].x) / 2,
+        y: (points[0].y + points[1].y) / 2
+      };
+      poseGesture = {
+        x: center.x, y: center.y,
+        distance: points.length < 2 ? 0 : Math.hypot(points[1].x-points[0].x, points[1].y-points[0].y),
+        placement: { ...posePlacement }
+      };
+    }
+
+    poseLayer.addEventListener('pointerdown', (event) => {
+      if (!poseReady || photoBusy || event.button !== 0 || photoPointers.size >= 2) return;
+      event.preventDefault();
+      photoPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      poseLayer.setPointerCapture(event.pointerId);
+      beginPhotoGesture();
+    });
+
+    poseLayer.addEventListener('pointermove', (event) => {
+      if (!photoPointers.has(event.pointerId) || !poseGesture) return;
+      event.preventDefault();
+      photoPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      const points = Array.from(photoPointers.values());
+      const origin = poseGesture.placement;
+      if (points.length === 1) {
+        posePlacement.x = origin.x + points[0].x - poseGesture.x;
+        posePlacement.y = origin.y + points[0].y - poseGesture.y;
+      } else {
+        const center = { x: (points[0].x+points[1].x)/2, y: (points[0].y+points[1].y)/2 };
+        const distance = Math.hypot(points[1].x-points[0].x, points[1].y-points[0].y);
+        const rawWidth = origin.width * distance / Math.max(1, poseGesture.distance);
+        // 技術上の限界だけ設定。4pxから画面幅の20倍まで自由に配置可能。
+        const width = Math.max(4, Math.min(window.innerWidth * 20, rawWidth));
+        const ratio = width / origin.width;
+        posePlacement = {
+          x: center.x + (origin.x-poseGesture.x)*ratio,
+          y: center.y + (origin.y-poseGesture.y)*ratio,
+          width
+        };
+      }
+      renderPose();
+    });
+
+    function endPhotoPointer(event) {
+      if (!photoPointers.has(event.pointerId)) return;
+      photoPointers.delete(event.pointerId);
+      if (poseLayer.hasPointerCapture(event.pointerId)) poseLayer.releasePointerCapture(event.pointerId);
+      beginPhotoGesture();
+    }
+    ['pointerup', 'pointercancel', 'lostpointercapture'].forEach((type) => {
+      poseLayer.addEventListener(type, endPhotoPointer);
+    });
+    // PCでも同じポーズを拡縮できる。スマートフォンはピンチ操作。
+    poseLayer.addEventListener('wheel', (event) => {
+      if (!poseReady || photoBusy) return;
+      event.preventDefault();
+      const old = posePlacement.width;
+      const width = Math.max(4, Math.min(window.innerWidth*20, old*Math.exp(-event.deltaY*.002)));
+      const scale = width/old;
+      posePlacement = { x: event.clientX+(posePlacement.x-event.clientX)*scale,
+        y: event.clientY+(posePlacement.y-event.clientY)*scale, width };
+      renderPose();
+    }, { passive: false });
+
+    function coverCrop(sourceWidth, sourceHeight, viewWidth, viewHeight) {
+      const scale = Math.max(viewWidth/sourceWidth, viewHeight/sourceHeight);
+      const width = viewWidth/scale;
+      const height = viewHeight/scale;
+      return { x: (sourceWidth-width)/2, y: (sourceHeight-height)/2, width, height };
+    }
+
+    shutter.addEventListener('click', async () => {
+      if (!poseReady || photoBusy || !cameraCanCapture()) { updateShutter(); return; }
+      clearPhotoGesture();
+      photoBusy = true;
+      updateShutter();
+      let canvas;
+      try {
+        // DOMを写さず、videoのcoverトリミングとPNGのみを同じ座標系で合成する。
+        const view = camera.getBoundingClientRect();
+        const pose = poseImage.getBoundingClientRect();
+        const crop = coverCrop(camera.videoWidth, camera.videoHeight, view.width, view.height);
+        const resolution = Math.min(crop.width/view.width, crop.height/view.height,
+          4096/Math.max(view.width,view.height), Math.sqrt(8000000/(view.width*view.height)));
+        canvas = document.createElement('canvas');
+        canvas.width = Math.max(1,Math.round(view.width*resolution));
+        canvas.height = Math.max(1,Math.round(view.height*resolution));
+        const ctx = canvas.getContext('2d');
+        if (!ctx) throw new Error('画像の合成を開始できませんでした。');
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(camera,crop.x,crop.y,crop.width,crop.height,0,0,canvas.width,canvas.height);
+        const scaleX = canvas.width/view.width, scaleY = canvas.height/view.height;
+        ctx.drawImage(poseImage,(pose.left-view.left)*scaleX,(pose.top-view.top)*scaleY,
+          pose.width*scaleX,pose.height*scaleY);
+        photoResult.hidden = false;
+        photoPreview.hidden = true;
+        shareButton.hidden = true;
+        downloadPhoto.hidden = true;
+        backToCamera.disabled = true;
+        saveHint.textContent = '写真を作成しています…';
+        const blob = await new Promise((resolve,reject) => canvas.toBlob(
+          (value) => value ? resolve(value) : reject(new Error('画像を書き出せませんでした。')), 'image/jpeg', .96));
+        if (photoURL) URL.revokeObjectURL(photoURL);
+        const name = 'zenjiro-' + new Date().toISOString().replace(/[:.]/g,'-') + '.jpg';
+        photoFile = new File([blob],name,{ type: blob.type });
+        photoURL = URL.createObjectURL(blob);
+        photoPreview.src = photoURL;
+        photoPreview.hidden = false;
+        downloadPhoto.href = photoURL;
+        downloadPhoto.download = name;
+        downloadPhoto.hidden = false;
+        let canShareFile = false;
+        try { canShareFile = !!(navigator.share && navigator.canShare && navigator.canShare({ files: [photoFile] })); } catch (_) {}
+        shareButton.hidden = !canShareFile;
+        saveHint.textContent = canShareFile
+          ? '「共有して保存」から「画像を保存」を選んでください。上の写真を長押しして保存することもできます。'
+          : 'iPhoneでは上の写真を長押しして「写真に保存」を選んでください。PCでは「画像を保存」を押してください。';
+        backToCamera.focus();
+      } catch (error) {
+        photoResult.hidden = true;
+        photoHint.textContent = '撮影できませんでした。' + error.message;
+        logCameraError('記念写真の撮影',error);
+      } finally {
+        if (canvas) { canvas.width = 1; canvas.height = 1; }
+        photoBusy = false;
+        backToCamera.disabled = false;
+        shutter.disabled = !poseReady || !cameraCanCapture();
+      }
+    });
+
+    shareButton.addEventListener('click', async () => {
+      if (!photoFile) return;
+      // エンコード済みのFileを使い、タップ直後のユーザー操作権限で共有画面を開く。
+      try { await navigator.share({ files: [photoFile], title: '膳二郎との記念写真' }); }
+      catch (error) {
+        if (error.name !== 'AbortError') saveHint.textContent = '共有を開けませんでした。上の写真を長押しして保存してください。';
+      }
+    });
+    backToCamera.addEventListener('click', () => {
+      photoResult.hidden = true;
+      clearPhotoGesture();
+      updateShutter();
+      shutter.focus();
+    });
+    photoResult.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && !photoBusy) backToCamera.click();
+      if (event.key !== 'Tab') return;
+      const items = [shareButton, downloadPhoto, backToCamera].filter((item) => !item.hidden && !item.disabled);
+      const first = items[0], last = items[items.length-1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    });
+    window.addEventListener('pagehide', () => { hidePose(); photoResult.hidden = true; });
   </script>
 </body>
 </html>
