@@ -118,10 +118,37 @@
     #photo-back { background: #344c5d; color: white; }
     #photo-result p { margin: 10px auto; max-width: 36em; }
     #pose-layer[hidden], #photo-controls[hidden], #photo-result[hidden], #photo-preview[hidden], #photo-share[hidden], #photo-download[hidden] { display: none; }
+    #still-background { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: center; image-orientation: from-image; pointer-events: none; user-select: none; }
+    #mode-screen { position: fixed; inset: 0; z-index: 8; background: #a9dfff; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; padding: 24px; font: 16px/1.6 system-ui,sans-serif; color: #304d60; }
+    #mode-screen h1 { font-size: 24px; margin: 0 0 8px; }
+    #mode-screen button, #take-person, #mode-back, #retake-person { border: 0; border-radius: 10px; padding: 12px 18px; min-height: 44px; background: white; color: #304d60; font: inherit; cursor: pointer; }
+    #mode-screen button { width: min(100%,320px); font-size: 20px; }
+    #mode-screen small { display: block; font-size: 13px; margin-top: 4px; }
+    #still-intro { position: fixed; inset: 0; z-index: 5; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 12px; padding: 28px; text-align: center; color: #304d60; font: 16px/1.6 system-ui,sans-serif; }
+    #still-message { max-width: 30em; }
+    #mode-back { position: fixed; z-index: 6; top: max(16px,env(safe-area-inset-top)); left: 12px; font: 13px system-ui,sans-serif; padding: 10px; }
+    #retake-person { position: fixed; z-index: 5; left: 12px; bottom: max(18px,env(safe-area-inset-bottom)); font: 13px system-ui,sans-serif; }
+    #person-file { display: none; }
+    #still-background[hidden], #mode-screen[hidden], #still-intro[hidden], #mode-back[hidden], #retake-person[hidden] { display: none; }
+    body[data-mode="choose"] #fly-again, body[data-mode="choose"] .camera-controls,
+    body[data-mode="still"] .camera-controls, body[data-mode="still"] .camera { display: none; }
   </style>
 </head>
-<body>
+<body data-mode="choose">
   <video class="camera" autoplay muted playsinline hidden aria-hidden="true"></video>
+  <img id="still-background" alt="撮影した人物写真" hidden>
+  <section id="mode-screen" aria-labelledby="mode-title">
+    <h1 id="mode-title">膳二郎と記念写真</h1>
+    <button id="choose-live" type="button">大先生がさつえい<small>カメラ映像を見ながら撮影</small></button>
+    <button id="choose-still" type="button">みんなでたのしむ<small>先に写真を撮って、みんなで配置</small></button>
+  </section>
+  <button id="mode-back" type="button" hidden>モード選択</button>
+  <section id="still-intro" hidden aria-label="人物写真の撮影">
+    <p id="still-message" role="status">最初に人物写真を撮りましょう。撮影した写真の上に膳二郎を配置できます。</p>
+    <button id="take-person" type="button">写真を撮る</button>
+  </section>
+  <input id="person-file" type="file" accept="image/*" capture="environment" aria-label="人物写真を撮る">
+  <button id="retake-person" type="button" hidden>写真を撮り直す</button>
   <button id="fly-again" type="button">もう一度飛ばす</button>
   <details class="camera-diagnostics" open>
     <summary>カメラ診断（タップで開閉）</summary>
@@ -416,6 +443,101 @@
     let photoBusy = false;
     let photoFile = null;
     let photoURL = null;
+    let shootingMode = 'choose';
+    let stillURL = null;
+    let importRequest = 0;
+    const stillBackground = document.querySelector('#still-background');
+    const modeScreen = document.querySelector('#mode-screen');
+    const modeBack = document.querySelector('#mode-back');
+    const stillIntro = document.querySelector('#still-intro');
+    const stillMessage = document.querySelector('#still-message');
+    const personFile = document.querySelector('#person-file');
+    const retakePerson = document.querySelector('#retake-person');
+
+    function setShootingMode(mode) {
+      if (cameraStarting || photoBusy) return;
+      importRequest += 1;
+      finishFlight();
+      stopCamera();
+      hidePose();
+      photoResult.hidden = true;
+      if (photoURL) URL.revokeObjectURL(photoURL);
+      photoURL = null;
+      photoFile = null;
+      photoPreview.removeAttribute('src');
+      if (stillURL) URL.revokeObjectURL(stillURL);
+      stillURL = null;
+      stillBackground.hidden = true;
+      stillBackground.removeAttribute('src');
+      shootingMode = mode;
+      document.body.dataset.mode = mode;
+      document.body.dataset.scene = 'idle';
+      modeScreen.hidden = mode !== 'choose';
+      modeBack.hidden = mode === 'choose';
+      stillIntro.hidden = mode !== 'still';
+      retakePerson.hidden = true;
+      cameraControls.hidden = mode !== 'live';
+      cameraStatus.textContent = 'カメラを開始すると、使用許可を求めます。';
+      cameraStart.textContent = 'カメラを開始';
+      flyAgain.disabled = mode !== 'live';
+      stillMessage.textContent = '最初に人物写真を撮りましょう。撮影した写真の上に膳二郎を配置できます。';
+    }
+    document.querySelector('#choose-live').addEventListener('click', () => setShootingMode('live'));
+    document.querySelector('#choose-still').addEventListener('click', () => setShootingMode('still'));
+    modeBack.addEventListener('click', () => setShootingMode('choose'));
+    // カメラ起動の許可待ち中にモードを切り替えて、取得中の映像を取り残さない。
+    cameraStart.addEventListener('click', () => { modeBack.disabled = cameraStarting; });
+    new MutationObserver(() => { modeBack.disabled = cameraStarting; })
+      .observe(cameraStart, { attributes: true, attributeFilter: ['disabled'] });
+    function openPersonCamera() {
+      if (photoBusy) return;
+      personFile.value = '';
+      // iPhone/Androidの標準カメラを要求。端末によっては画像選択メニューになる。
+      personFile.click();
+    }
+    document.querySelector('#take-person').addEventListener('click', openPersonCamera);
+    retakePerson.addEventListener('click', openPersonCamera);
+    personFile.addEventListener('change', async () => {
+      const file = personFile.files && personFile.files[0];
+      if (!file || shootingMode !== 'still') return;
+      const request = ++importRequest;
+      const candidateURL = URL.createObjectURL(file);
+      const candidate = new Image();
+      candidate.src = candidateURL;
+      stillIntro.hidden = false;
+      stillMessage.textContent = '写真を読み込んでいます…';
+      try {
+        await imageReady(candidate);
+        if (request !== importRequest || shootingMode !== 'still') {
+          URL.revokeObjectURL(candidateURL); return;
+        }
+        // 元ファイルを加工せず保持。表示・合成とも同じ中央coverトリミング。
+        stillBackground.src = candidateURL;
+        await imageReady(stillBackground);
+        if (request !== importRequest || shootingMode !== 'still') {
+          URL.revokeObjectURL(candidateURL); return;
+        }
+        if (stillURL) URL.revokeObjectURL(stillURL);
+        stillURL = candidateURL;
+        stillBackground.hidden = false;
+        stillIntro.hidden = true;
+        retakePerson.hidden = false;
+        photoResult.hidden = true;
+        flyAgain.disabled = false;
+        flyBird();
+      } catch (error) {
+        URL.revokeObjectURL(candidateURL);
+        if (request !== importRequest) return;
+        stillMessage.textContent = '写真を読み込めませんでした。標準カメラで撮り直すか、JPEG・PNG画像を選んでください。';
+        logCameraError('人物写真の読み込み',error);
+      }
+    });
+
+    function backgroundCanCapture() {
+      return shootingMode === 'still'
+        ? !stillBackground.hidden && stillBackground.complete && stillBackground.naturalWidth > 0
+        : shootingMode === 'live' && cameraCanCapture();
+    }
 
     function renderPose() {
       poseImage.style.width = posePlacement.width + 'px';
@@ -428,11 +550,13 @@
     }
 
     function updateShutter() {
-      shutter.disabled = !poseReady || photoBusy || !cameraCanCapture();
-      shutter.hidden = !cameraCanCapture();
-      photoControls.style.bottom = cameraCanCapture() ? '' : '145px';
+      shutter.disabled = !poseReady || photoBusy || !backgroundCanCapture();
+      shutter.hidden = !backgroundCanCapture();
+      shutter.textContent = shootingMode === 'still' ? '完成' : '撮影';
+      shutter.setAttribute('aria-label', shootingMode === 'still' ? '合成写真を完成させる' : '記念写真を撮影');
+      photoControls.style.bottom = backgroundCanCapture() ? '' : '145px';
       if (!poseReady || photoBusy) return;
-      photoHint.textContent = cameraCanCapture()
+      photoHint.textContent = backgroundCanCapture()
         ? '1本指で移動・2本指で大きさ調整'
         : '配置は確認できます。撮影にはカメラの開始が必要です。';
     }
@@ -570,16 +694,19 @@
     }
 
     shutter.addEventListener('click', async () => {
-      if (!poseReady || photoBusy || !cameraCanCapture()) { updateShutter(); return; }
+      if (!poseReady || photoBusy || !backgroundCanCapture()) { updateShutter(); return; }
       clearPhotoGesture();
       photoBusy = true;
       updateShutter();
       let canvas;
       try {
         // DOMを写さず、videoのcoverトリミングとPNGのみを同じ座標系で合成する。
-        const view = camera.getBoundingClientRect();
+        const background = shootingMode === 'still' ? stillBackground : camera;
+        const view = background.getBoundingClientRect();
         const pose = poseImage.getBoundingClientRect();
-        const crop = coverCrop(camera.videoWidth, camera.videoHeight, view.width, view.height);
+        const sourceWidth = shootingMode === 'still' ? background.naturalWidth : camera.videoWidth;
+        const sourceHeight = shootingMode === 'still' ? background.naturalHeight : camera.videoHeight;
+        const crop = coverCrop(sourceWidth, sourceHeight, view.width, view.height);
         const resolution = Math.min(crop.width/view.width, crop.height/view.height,
           4096/Math.max(view.width,view.height), Math.sqrt(8000000/(view.width*view.height)));
         canvas = document.createElement('canvas');
@@ -589,7 +716,7 @@
         if (!ctx) throw new Error('画像の合成を開始できませんでした。');
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = 'high';
-        ctx.drawImage(camera,crop.x,crop.y,crop.width,crop.height,0,0,canvas.width,canvas.height);
+        ctx.drawImage(background,crop.x,crop.y,crop.width,crop.height,0,0,canvas.width,canvas.height);
         const scaleX = canvas.width/view.width, scaleY = canvas.height/view.height;
         ctx.drawImage(poseImage,(pose.left-view.left)*scaleX,(pose.top-view.top)*scaleY,
           pose.width*scaleX,pose.height*scaleY);
@@ -606,15 +733,21 @@
         photoFile = new File([blob],name,{ type: blob.type });
         photoURL = URL.createObjectURL(blob);
         photoPreview.src = photoURL;
+        photoPreview.alt = shootingMode === 'still'
+          ? '人物写真と膳二郎を合成した記念写真' : 'カメラ映像と膳二郎を合成した記念写真';
         photoPreview.hidden = false;
         downloadPhoto.href = photoURL;
         downloadPhoto.download = name;
         downloadPhoto.hidden = false;
+        shareButton.textContent = shootingMode === 'still' ? '保存する' : '共有して保存';
+        downloadPhoto.textContent = shootingMode === 'still' ? '保存する' : '画像を保存';
+        backToCamera.textContent = shootingMode === 'still' ? 'やりなおす' : '撮影画面に戻る';
         let canShareFile = false;
         try { canShareFile = !!(navigator.share && navigator.canShare && navigator.canShare({ files: [photoFile] })); } catch (_) {}
         shareButton.hidden = !canShareFile;
+        if (shootingMode === 'still' && canShareFile) downloadPhoto.hidden = true;
         saveHint.textContent = canShareFile
-          ? '「共有して保存」から「画像を保存」を選んでください。上の写真を長押しして保存することもできます。'
+          ? (shootingMode === 'still' ? '「保存する」を押し、共有画面で「画像を保存」を選んでください。' : '「共有して保存」から「画像を保存」を選んでください。上の写真を長押しして保存することもできます。')
           : 'iPhoneでは上の写真を長押しして「写真に保存」を選んでください。PCでは「画像を保存」を押してください。';
         backToCamera.focus();
       } catch (error) {
@@ -625,7 +758,7 @@
         if (canvas) { canvas.width = 1; canvas.height = 1; }
         photoBusy = false;
         backToCamera.disabled = false;
-        shutter.disabled = !poseReady || !cameraCanCapture();
+        shutter.disabled = !poseReady || !backgroundCanCapture();
       }
     });
 
