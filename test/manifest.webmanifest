@@ -1,0 +1,14 @@
+{
+  "id": "/CameraTest_01/test/",
+  "name": "アメフォト｜膳二郎版 テスト",
+  "short_name": "アメフォト テスト",
+  "lang": "ja",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#a9dfff",
+  "theme_color": "#a9dfff",
+  "icons": [
+    { "src": "icons/amephoto-test.png", "sizes": "180x180", "type": "image/png" }
+  ]
+}
